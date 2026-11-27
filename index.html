@@ -124,11 +124,11 @@ function listHTML(){
 function viewV(){return `${S.caja?"":'<div class="card alert"><b>La caja está cerrada</b><br><small class="note">Abrila en la pestaña Ventas para poder cobrar.</small></div>'}<button class="btn" data-cam="v" style="margin:0 0 8px">Escanear con la cámara</button><input id="q" type="search" placeholder="Escanear con lápiz o buscar producto" value="${esc(S.q)}" autocomplete="off"><div id="vl">${listHTML()}</div><p class="note">Lápiz óptico: conectalo por USB o Bluetooth y escaneá. Cada venta descuenta primero el lote que vence antes.</p>`}
 
 async function viewS(){
- const {data}=S.caja?await sb.from("ventas").select("total,costo_total,creada_en").eq("caja_id",S.caja.id).order("creada_en",{ascending:false}):{data:[]};
- const m=data||[],v=m.reduce((a,s)=>a+Number(s.total),0),i=m.reduce((a,s)=>a+Number(s.costo_total),0);
+ const {data}=S.caja?await sb.from("ventas").select("id,total,costo_total,creada_en").eq("caja_id",S.caja.id).order("creada_en",{ascending:false}):{data:[]};
+ const m=data||[],cmp=await comprobantesDe(m.map(s=>s.id)),v=m.reduce((a,s)=>a+Number(s.total),0),i=m.reduce((a,s)=>a+Number(s.costo_total),0);
  return resHTML()+`<h2>Ventas de la caja actual</h2><div class="card"><div class="fld"><span>Vendido</span><b>${money(v)}</b></div><div class="fld"><span>Invertido (costo de lo vendido)</span><b>${money(i)}</b></div><div class="fld"><span>Ganancia</span><b class="gan">${money(v-i)}</b></div><p class="note">${m.length} ventas. Ganancia = vendido − invertido.</p></div>`+
   cajaHTML()+"<h2>Ventas de esta caja</h2>"+
-  (m.map(s=>`<div class="card"><div class="top"><span>${new Date(s.creada_en).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})}</span><span>${money(s.total)}</span></div><small class="note">Ganancia ${money(s.total-s.costo_total)}</small></div>`).join("")||'<p class="card">Todavía no hay ventas en esta caja.</p>')+(S.rol=="admin"?mesHTML(await fetchMes(false)):"");
+  (m.map(s=>`<div class="card"><div class="top"><span>${new Date(s.creada_en).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})}</span><span>${money(s.total)}</span></div><small class="note">Ganancia ${money(s.total-s.costo_total)}</small>${comprobanteHTML(s.id,cmp)}</div>`).join("")||'<p class="card">Todavía no hay ventas en esta caja.</p>')+(S.rol=="admin"?mesHTML(await fetchMes(false)):"");
 }
 
 async function viewI(){
@@ -151,7 +151,7 @@ function prodLimits(d){
 }
 async function viewC(){
  const c=S.cfg||{},d=S.rol=="admin"?"":" disabled";
- return `<h2>Límites de los avisos</h2><div class="card"><label>Avisar stock bajo desde (unidades)<input id="gm" type="number" min="0" value="${c.stock_minimo_general??5}"${d}></label><label>Avisar vencimientos con (días)<input id="gd" type="number" min="0" value="${c.dias_alerta_vencimiento??30}"${d}></label>${d?'<p class="note">Solo el propietario puede cambiarlos.</p>':'<button class="btn" data-save="1">Guardar límites</button>'}</div>${await usuariosHTML(d)}${negocioHTML(d)}${preciosHTML(d)}${balanzaHTML(d)}${prodLimits(d)}<button class="btn" data-out="1">Cerrar sesión</button>`;
+ return `<h2>Límites de los avisos</h2><div class="card"><label>Avisar stock bajo desde (unidades)<input id="gm" type="number" min="0" value="${c.stock_minimo_general??5}"${d}></label><label>Avisar vencimientos con (días)<input id="gd" type="number" min="0" value="${c.dias_alerta_vencimiento??30}"${d}></label>${d?'<p class="note">Solo el propietario puede cambiarlos.</p>':'<button class="btn" data-save="1">Guardar límites</button>'}</div>${await usuariosHTML(d)}${negocioHTML(d)}${facturacionHTML(d)}${preciosHTML(d)}${balanzaHTML(d)}${prodLimits(d)}<button class="btn" data-out="1">Cerrar sesión</button>`;
 }
 
 async function render(){
@@ -202,6 +202,11 @@ async function pay(){
  const {error:e2}=await sb.from("venta_items").insert(rows);
  if(e2){await sb.from("ventas").delete().eq("id",v.id);return toast(e2.message)}
  S.cart={};S.sub={};S.pago="efectivo";S.clisel=null;await loadData();toast("Venta cobrada");render();
+ if(S.negocio&&S.negocio.facturacion_activa&&S.negocio.facturar_auto){
+  const r=await facturarVenta(v.id);
+  if(!r.ok)alert("La venta se cobró, pero no se pudo facturar: "+r.msg+"\nPodés facturarla desde la pestaña Ventas.");
+  else toast("Venta cobrada y facturada");
+ }
 }
 async function ingresar(){
  const g=id=>$(id).value;
@@ -677,6 +682,58 @@ async function eliminarProd(id){
  if(error)return toast(error.message);
  await loadData();toast("Producto eliminado");render();
 }
+async function comprobantesDe(ids){
+ if(!ids.length||!(S.negocio&&S.negocio.facturacion_activa))return {};
+ const {data}=await sb.from("comprobantes").select("venta_id,estado,numero,cae,pdf_url,error").in("venta_id",ids);
+ const m={};
+ (data||[]).forEach(c=>{if(!m[c.venta_id]||c.estado=="emitido")m[c.venta_id]=c});
+ return m;
+}
+function comprobanteHTML(id,cmp){
+ if(!(S.negocio&&S.negocio.facturacion_activa))return "";
+ const c=cmp[id];
+ if(c&&c.estado=="emitido"){
+  const ok=c.pdf_url&&/^https:\/\//.test(c.pdf_url);
+  return `<br><small class="note">Factura C ${esc(c.numero||"")} · CAE ${esc(c.cae||"")}</small>${ok?` <a href="${esc(c.pdf_url)}" target="_blank" rel="noopener" style="color:var(--pri);font-weight:600">Ver PDF</a>`:""}`;
+ }
+ return `<br>${c&&c.error?`<small class="note" style="color:var(--bad)">${esc(c.error)}</small><br>`:""}<button style="color:var(--pri);font-weight:600;padding:6px 0" data-fact="${id}">Facturar</button>`;
+}
+async function facturarVenta(id,rec){
+ const {data,error}=await sb.functions.invoke("clever-worker",{body:{accion:"facturar",venta_id:id,receptor:rec||null}});
+ if(error){let m=error.message;try{const j=await error.context.json();m=j.error||j.message||m}catch(e){}return {ok:false,msg:m}}
+ if(data&&data.error)return {ok:false,msg:data.error};
+ return {ok:true,data};
+}
+async function btnFacturar(id){
+ const raw=prompt("DNI o CUIT del cliente. Dejá vacío para consumidor final:");
+ if(raw===null)return;
+ const nro=raw.replace(/\D/g,"");
+ const rec=nro?{tipo:nro.length==11?"CUIT":"DNI",nro}:null;
+ toast("Emitiendo la factura…");
+ const r=await facturarVenta(id,rec);
+ if(!r.ok){alert("No se pudo facturar: "+r.msg);return render()}
+ toast("Factura emitida");render();
+}
+function facturacionHTML(d){
+ if(d)return "";
+ const n=S.negocio||{};
+ return `<h2>Facturación electrónica (ARCA)</h2><div class="card"><p class="note">Estado: ${n.facturacion_activa?"conectada":"sin conectar"}. Por ahora funciona para monotributistas (Factura C). Las credenciales se guardan en el servidor y no se vuelven a mostrar.</p><input id="ft1" type="password" placeholder="usertoken" autocomplete="off"><input id="ft2" type="password" placeholder="apikey" autocomplete="off"><input id="ft3" type="password" placeholder="apitoken" autocomplete="off"><button class="btn" data-fcred="1">Guardar credenciales</button><label>Código de provincia<input id="fpv" inputmode="numeric" value="${esc(n.provincia_codigo||"2")}"></label><label class="note"><input id="fau" type="checkbox"${n.facturar_auto?" checked":""} style="width:auto"> Facturar automáticamente cada venta</label><button class="btn" data-fsave="1">Guardar opciones</button></div>`;
+}
+async function guardarCredenciales(){
+ const body={accion:"guardar_credenciales",usertoken:$("ft1").value,apikey:$("ft2").value,apitoken:$("ft3").value};
+ if(!body.usertoken||!body.apikey||!body.apitoken)return toast("Completá las tres credenciales");
+ const {data,error}=await sb.functions.invoke("clever-worker",{body});
+ if(error){let m=error.message;try{const j=await error.context.json();m=j.error||j.message||m}catch(e){}return toast(m)}
+ if(data&&data.error)return toast(data.error);
+ const {data:n}=await sb.from("negocios").select("*").maybeSingle();S.negocio=n;
+ toast("Credenciales guardadas");render();
+}
+async function guardarOpcionesFact(){
+ const {error}=await sb.from("negocios").update({provincia_codigo:$("fpv").value.trim()||"2",facturar_auto:$("fau").checked}).eq("id",S.perfil.negocio_id);
+ if(error)return toast(error.message);
+ const {data:n}=await sb.from("negocios").select("*").maybeSingle();S.negocio=n;
+ toast("Opciones guardadas");render();
+}
 async function newProd(){
  const g=id=>$(id).value.trim();
  if(!g("np")||!(+g("npr")>=0)||g("npr")==="")return toast("Falta el nombre o el precio");
@@ -714,6 +771,9 @@ document.addEventListener("click",async e=>{
  if(d.pdes)return activoProd(d.pdes,false);
  if(d.pact)return activoProd(d.pact,true);
  if(d.baja)return darBaja(d.baja,d.q);
+ if(d.fact)return btnFacturar(d.fact);
+ if(d.fcred)return guardarCredenciales();
+ if(d.fsave)return guardarOpcionesFact();
  if(d.psave)return guardarPrecio(d.psave);
  if(d.psetsave)return guardarPreciosCfg();
  if(d.balsave)return guardarBalanza();
