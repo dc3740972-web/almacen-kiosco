@@ -44,7 +44,7 @@ const money=n=>"$"+Number(n||0).toLocaleString("es-AR");
 const today=new Date();today.setHours(0,0,0,0);
 const days=s=>Math.round((new Date(s+"T00:00:00")-today)/864e5);
 const when=d=>d==0?"hoy":d==1?"mañana":"en "+d+" días";
-const S={tab:"v",q:"",cart:{},sub:{},pesar:null,imp:null,clisel:null,cli:[],prods:[],stock:[],locs:[],cfg:null};
+const S={tab:"v",q:"",cart:{},sub:{},pesar:null,imp:null,offline:false,sync:false,paying:false,cola:0,clisel:null,cli:[],cats:[],prods:[],stock:[],locs:[],cfg:null};
 function toast(t){const e=$("toast");e.textContent=t;e.style.display="block";clearTimeout(toast.t);toast.t=setTimeout(()=>e.style.display="none",3500)}
 let ac=null;
 function beep(ok){
@@ -64,10 +64,12 @@ function renderLogin(msg){
  $("app").innerHTML=`<main><h1>Almacén y kiosco</h1><h2>Entrar</h2><div class="card"><input id="em" type="email" placeholder="Email" autocomplete="username"><input id="pw" type="password" placeholder="Contraseña" autocomplete="current-password"><button class="btn" data-login="1">Entrar</button><p class="note">${esc(msg||"")}</p></div></main>`;
 }
 async function boot(){
+ if(!navigator.onLine&&await usarSnapshot())return;
  const {data:{session}}=await sb.auth.getSession();
  if(!session)return renderLogin();
  S.user=session.user;
- const {data:p}=await sb.from("perfiles").select("*").eq("id",S.user.id).maybeSingle();
+ const {data:p,error:perr}=await sb.from("perfiles").select("*").eq("id",S.user.id).maybeSingle();
+ if(esRed(perr)&&await usarSnapshot())return;
  if(!p){await sb.auth.signOut();return renderLogin("Tu usuario todavía no tiene perfil. Pedile al propietario que lo cargue.")}
  S.perfil=p;
  S.rol=p.rol=="vendedor"?"cajero":p.rol=="encargado"?"admin":p.rol;
@@ -90,15 +92,18 @@ async function pag(q){
  return {data:all};
 }
 async function loadData(){
- const [a,b,c,d,e,f,g]=await Promise.all([
+ const [a,b,c,d,e,f,g,h]=await Promise.all([
   pag((a,b)=>sb.from("productos").select("*").eq("activo",true).order("nombre").order("id").range(a,b)),
   pag((a,b)=>sb.from("stock").select("cantidad,lote_id,lotes(id,codigo_lote,fecha_vencimiento,producto_id)").eq("ubicacion_id",S.loc).gt("cantidad",0).order("lote_id").range(a,b)),
   sb.from("configuracion_alertas").select("*").maybeSingle(),
   sb.from("v_stock_bajo").select("producto").eq("ubicacion_id",S.loc),
   sb.from("v_por_vencer").select("producto").eq("ubicacion_id",S.loc),
   sb.from("cajas").select("*").eq("ubicacion_id",S.loc).eq("estado","abierta").maybeSingle(),
-  sb.from("v_saldos_clientes").select("*").eq("activo",true).order("nombre")]);
- S.prods=a.data||[];S.stock=b.data||[];S.cfg=c.data;S.na=(S.rol=="repositor"?0:(d.data||[]).length)+(e.data||[]).length;S.caja=f.data||null;S.cli=g.data||[];
+  sb.from("v_saldos_clientes").select("*").eq("activo",true).order("nombre"),
+  sb.from("categorias").select("id,nombre").order("nombre")]);
+ if(esRed(a.error)||esRed(b.error)){S.offline=true;return false}
+ S.offline=false;
+ S.prods=a.data||[];S.stock=b.data||[];S.cfg=c.data;S.na=(S.rol=="repositor"?0:(d.data||[]).length)+(e.data||[]).length;S.caja=f.data||null;S.cli=g.data||[];S.cats=h.data||[];snapGuardar();
 }
 
 function listHTML(){
@@ -130,6 +135,7 @@ async function viewS(){
  let h=resHTML();
  if(adm)h+=`<h2>Ventas de la caja actual</h2><div class="card"><div class="fld"><span>Vendido</span><b>${money(v)}</b></div><div class="fld"><span>Invertido (costo de lo vendido)</span><b>${money(i)}</b></div><div class="fld"><span>Ganancia</span><b class="gan">${money(v-i)}</b></div><p class="note">${m.length} ventas. Ganancia = vendido − invertido.</p></div>`;
  h+=cajaHTML();
+ h+=await pendientesHTML();
  if(S.caja)h+=await gastosHTML();
  h+="<h2>Ventas de esta caja</h2>"+(m.map(s=>`<div class="card"><div class="top"><span>${new Date(s.creada_en).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})}</span><span>${money(s.total)}</span></div>${adm?`<small class="note">Ganancia ${money(s.total-s.costo_total)}</small>`:""}${comprobanteHTML(s.id,cmp)}</div>`).join("")||'<p class="card">Todavía no hay ventas en esta caja.</p>');
  if(adm)h+=await cierresHTML()+mesHTML(await fetchMes(false));
@@ -138,11 +144,12 @@ async function viewS(){
 async function viewI(){
  const opts=S.prods.map(p=>`<option value="${p.id}">${esc(p.nombre)}</option>`).join("");
  return `<h2>Ingresar mercadería</h2><div class="card"><button class="btn" data-cam="i" style="margin:0 0 8px">Escanear producto con la cámara</button><select id="ip">${opts}</select><input id="iq" type="number" min="0" step="any" inputmode="decimal" placeholder="Cantidad (en kilos si es por peso)"><input id="ic" type="number" min="0" step="any" placeholder="Costo por unidad (por kilo si es por peso)"><select id="im">${mgOpts(defModo())}</select><input id="imo" type="number" step="any" placeholder="Porcentaje de ganancia" style="display:none"><input id="ipr" type="number" min="0" step="any" inputmode="decimal" placeholder="Precio de venta (se calcula solo)"><input id="ie" type="date" aria-label="Vencimiento"><input id="il" placeholder="Código de lote (opcional)"><button class="btn" data-ing="1">Cargar al stock</button><p class="note">Se carga en la ubicación elegida arriba. El vencimiento se deja vacío si el producto no vence.</p></div>`+
-  `${impHTML()}<h2>Importar lista del ticket</h2><div class="card"><textarea id="tx" rows="5" placeholder="Leche entera;24;1000;2026-12-30"></textarea><button class="btn" data-imp="1">Importar al stock</button><p class="note">Una línea por producto: nombre;cantidad;costo;vencimiento. El vencimiento es opcional (AAAA-MM-DD).</p></div><h2>Nuevo producto</h2><div class="card"><input id="np" placeholder="Nombre"><input id="nb" placeholder="Código de barras"><button class="btn" data-lookup="1" style="margin:0 0 8px;background:var(--okbg);color:var(--ok)">Buscar nombre por código</button><input id="npr" type="number" min="0" step="any" placeholder="Precio de venta (por kilo si es por peso)"><input id="nco" type="number" min="0" step="any" placeholder="Costo (por kilo si es por peso)"><select id="nm">${mgOpts(defModo())}</select><input id="nmo" type="number" step="any" placeholder="Porcentaje de ganancia" value="${defModo()=="otro"?(S.negocio&&S.negocio.margen_defecto):""}" style="${defModo()=="otro"?"":"display:none"}">${esRI()?`<select id="niv">${ivaOpts(21)}</select>`:""}<select id="nu"><option value="unidad">Se vende por unidad</option><option value="kg">Se vende por peso (kilo)</option></select><input id="nsi" type="number" min="0" step="any" inputmode="decimal" placeholder="Stock inicial (opcional)"><label class="note">Vencimiento del stock inicial (opcional)<input id="nve" type="date"></label><button class="btn" data-newp="1">Crear producto y cargar stock</button></div>`+
+  `${impHTML()}<h2>Importar lista del ticket</h2><div class="card"><textarea id="tx" rows="5" placeholder="Leche entera;24;1000;2026-12-30"></textarea><button class="btn" data-imp="1">Importar al stock</button><p class="note">Una línea por producto: nombre;cantidad;costo;vencimiento. El vencimiento es opcional (AAAA-MM-DD).</p></div><h2>Nuevo producto</h2><div class="card"><input id="np" placeholder="Nombre"><input id="nb" placeholder="Código de barras"><button class="btn" data-lookup="1" style="margin:0 0 8px;background:var(--okbg);color:var(--ok)">Buscar nombre por código</button><input id="npr" type="number" min="0" step="any" placeholder="Precio de venta (por kilo si es por peso)"><input id="nco" type="number" min="0" step="any" placeholder="Costo (por kilo si es por peso)"><select id="nm">${mgOpts(defModo())}</select><input id="nmo" type="number" step="any" placeholder="Porcentaje de ganancia" value="${defModo()=="otro"?(S.negocio&&S.negocio.margen_defecto):""}" style="${defModo()=="otro"?"":"display:none"}">${esRI()?`<select id="niv">${ivaOpts(21)}</select>`:""}<select id="ncat"><option value="">Sin categoría</option>${S.cats.map(c=>`<option value="${c.id}">${esc(c.nombre)}</option>`).join("")}</select><input id="nprov" placeholder="Proveedor (opcional)"><select id="nu"><option value="unidad">Se vende por unidad</option><option value="kg">Se vende por peso (kilo)</option></select><input id="nsi" type="number" min="0" step="any" inputmode="decimal" placeholder="Stock inicial (opcional)"><label class="note">Vencimiento del stock inicial (opcional)<input id="nve" type="date"></label><button class="btn" data-newp="1">Crear producto y cargar stock</button></div>`+
   `<h2>Stock actual</h2>`+(S.prods.map(p=>`<div class="card fld"><span>${esc(p.nombre)}</span><span><b>${fq(total(p.id))}${esKg(p)?" kg":""}</b>${total(p.id)==0?` <button style="color:var(--bad);font-weight:600;padding:6px" data-pdes="${p.id}">Dar de baja</button>`:""} <button style="color:var(--bad);font-weight:600;padding:6px" data-pdel="${p.id}">Eliminar</button></span></div>`).join("")||'<p class="note">Todavía no hay productos.</p>')+await inactivosHTML();
 }
 
 async function viewA(){
+ if(!navigator.onLine)return '<p class="card">Sin conexión: los avisos se actualizan cuando vuelva internet.</p>';
  const [b,x]=await Promise.all([sb.from("v_stock_bajo").select("*").eq("ubicacion_id",S.loc),sb.from("v_por_vencer").select("*").eq("ubicacion_id",S.loc)]);
  const out=[];
  (x.data||[]).forEach(r=>out.push(r.dias_restantes<0?`<div class="card alert bad"><b>Vencido: ${esc(r.producto)}</b><br><small class="note">${r.cantidad} unidades (lote ${esc(r.codigo_lote||"-")})</small>${S.rol=="cajero"?"":`<br><button style="color:var(--bad);font-weight:600;padding:6px 0" data-baja="${r.lote_id}" data-q="${r.cantidad}">Dar de baja</button>`}</div>`:`<div class="card alert"><b>Por vencer: ${esc(r.producto)}</b><br><small class="note">${r.cantidad} unidades vencen ${when(r.dias_restantes)}</small></div>`));
@@ -155,14 +162,14 @@ function prodLimits(d){
 }
 async function viewC(){
  const c=S.cfg||{},d=S.rol=="admin"?"":" disabled";
- return `<h2>Límites de los avisos</h2><div class="card"><label>Avisar stock bajo desde (unidades)<input id="gm" type="number" min="0" value="${c.stock_minimo_general??5}"${d}></label><label>Avisar vencimientos con (días)<input id="gd" type="number" min="0" value="${c.dias_alerta_vencimiento??30}"${d}></label>${d?'<p class="note">Solo el propietario puede cambiarlos.</p>':'<button class="btn" data-save="1">Guardar límites</button>'}</div>${await usuariosHTML(d)}${negocioHTML(d)}${facturacionHTML(d)}${preciosHTML(d)}${balanzaHTML(d)}${prodLimits(d)}<button class="btn" data-out="1">Cerrar sesión</button>`;
+ return `<h2>Límites de los avisos</h2><div class="card"><label>Avisar stock bajo desde (unidades)<input id="gm" type="number" min="0" value="${c.stock_minimo_general??5}"${d}></label><label>Avisar vencimientos con (días)<input id="gd" type="number" min="0" value="${c.dias_alerta_vencimiento??30}"${d}></label>${d?'<p class="note">Solo el propietario puede cambiarlos.</p>':'<button class="btn" data-save="1">Guardar límites</button>'}</div>${await usuariosHTML(d)}${negocioHTML(d)}${facturacionHTML(d)}${masivoHTML(d)}${preciosHTML(d)}${balanzaHTML(d)}${prodLimits(d)}<button class="btn" data-out="1">Cerrar sesión</button>`;
 }
 
 async function render(){
  const keys=TABS[S.rol]||TABS.cajero;if(!keys.includes(S.tab))S.tab=keys[0];
  const v={v:viewV,s:viewS,k:viewK,i:viewI,a:viewA,c:viewC}[S.tab];
  const h=await v(),T={v:"Vender",k:"Clientes",s:S.rol=="cajero"?"Caja":"Ventas",i:"Stock",a:S.rol=="repositor"?"Vencimientos":"Avisos",c:"Ajustes"};
- $("app").innerHTML=`<header><h1>${esc(S.negocio&&S.negocio.nombre||"Almacén y kiosco")}</h1><select id="loc" aria-label="Ubicación">${S.locs.filter(l=>S.rol!="cajero"||!S.perfil.ubicacion_id||l.id==S.perfil.ubicacion_id).map(l=>`<option value="${l.id}"${l.id==S.loc?" selected":""}>${esc(l.nombre)}</option>`).join("")}</select><button data-out="1" style="color:var(--pri);font-weight:600;padding:8px">Salir</button></header><main>${h}</main><nav>${keys.map(k=>`<button data-tab="${k}" class="${S.tab==k?"on":""}">${T[k]}${k=="a"&&S.na?" ("+S.na+")":""}</button>`).join("")}</nav>`;
+ $("app").innerHTML=`<header><h1>${esc(S.negocio&&S.negocio.nombre||"Almacén y kiosco")}</h1><select id="loc" aria-label="Ubicación">${S.locs.filter(l=>S.rol!="cajero"||!S.perfil.ubicacion_id||l.id==S.perfil.ubicacion_id).map(l=>`<option value="${l.id}"${l.id==S.loc?" selected":""}>${esc(l.nombre)}</option>`).join("")}</select>${estadoRedHTML()}<button data-out="1" style="color:var(--pri);font-weight:600;padding:8px">Salir</button></header><main>${h}</main><nav>${keys.map(k=>`<button data-tab="${k}" class="${S.tab==k?"on":""}">${T[k]}${k=="a"&&S.na?" ("+S.na+")":""}</button>`).join("")}</nav>`;
  if(S.tab=="i"&&$("ip"))prefillIngreso();
 }
 
@@ -180,6 +187,7 @@ function scan(code){
  beep(true);add(p.id);S.q="";S.tab="v";render();
 }
 async function pay(){
+ if(S.paying)return;
  if(!S.caja)return toast("Abrí la caja para vender");
  if(S.pago=="fiado"){
   const cl=S.cli.find(c=>c.cliente_id==S.clisel);
@@ -187,14 +195,12 @@ async function pay(){
   if(cl.limite_credito!=null&&Number(cl.saldo)+cartTotal()>Number(cl.limite_credito)&&!confirm("Supera el límite de crédito de "+cl.nombre+". ¿Cobrar igual?"))return;
  }
  const items=Object.entries(S.cart);if(!items.length)return;
- const {data:v,error:e1}=await sb.from("ventas").insert({ubicacion_id:S.loc,usuario_id:S.user.id,caja_id:S.caja.id,medio_pago:S.pago||"efectivo",cliente_id:S.pago=="fiado"?S.clisel:null}).select("id").single();
- if(e1)return toast(e1.message);
  const rows=[];
  for(const [pid,q] of items){
   let rem=q;const p=S.prods.find(x=>x.id==pid);
   for(const s of lotsOf(pid).filter(vend)){
    const t=Math.min(s.cantidad,rem);
-   if(t>0){rows.push({venta_id:v.id,producto_id:pid,lote_id:s.lote_id,cantidad:t,precio_unitario:p.precio_venta});rem=Math.round((rem-t)*1000)/1000}
+   if(t>0){rows.push({producto_id:pid,lote_id:s.lote_id,cantidad:t,precio_unitario:p.precio_venta});rem=Math.round((rem-t)*1000)/1000}
    if(rem<=0)break;
   }
  }
@@ -203,11 +209,16 @@ async function pay(){
   const rs=rows.filter(r=>r.producto_id==pid);let acc=0;
   rs.forEach((r,i)=>{r.subtotal=i<rs.length-1?Math.round(S.sub[pid]*r.cantidad/q*100)/100:Math.round((S.sub[pid]-acc)*100)/100;acc+=r.subtotal});
  }
- const {error:e2}=await sb.from("venta_items").insert(rows);
- if(e2){await sb.from("ventas").delete().eq("id",v.id);return toast(e2.message)}
- S.cart={};S.sub={};S.pago="efectivo";S.clisel=null;await loadData();toast("Venta cobrada");render();
+ const venta={local_id:crypto.randomUUID(),ubicacion_id:S.loc,caja_id:S.caja.id,medio_pago:S.pago||"efectivo",cliente_id:S.pago=="fiado"?S.clisel:null,creada_en:new Date().toISOString(),items:rows,total:Math.round(cartTotal()*100)/100};
+ S.paying=true;
+ const res=await enviarVenta(venta);
+ S.paying=false;
+ if(!res.ok)return toast(res.msg);
+ S.cart={};S.sub={};S.pago="efectivo";S.clisel=null;
+ if(res.pendiente){await actualizarCola();toast("Sin conexión: la venta quedó guardada y se envía sola cuando vuelva internet");render();return}
+ await loadData();toast("Venta cobrada");render();
  if(S.negocio&&S.negocio.facturacion_activa&&S.negocio.facturar_auto){
-  const r=await facturarVenta(v.id);
+  const r=await facturarVenta(res.id);
   if(!r.ok)alert("La venta se cobró, pero no se pudo facturar: "+r.msg+"\nPodés facturarla desde la pestaña Ventas.");
   else toast("Venta cobrada y facturada");
  }
@@ -305,6 +316,8 @@ async function abrirCaja(){
  await loadData();toast("Caja abierta");render();
 }
 async function cerrarCaja(){
+ const pend=await colaLeer();
+ if(pend.length)return toast("Hay "+pend.length+" ventas sin enviar. Esperá a que se envíen antes de cerrar el turno.");
  const raw=$("ccont").value;
  if(raw===""||!(+raw>=0))return toast("Poné el efectivo que contaste en la caja");
  if(!confirm("¿Cerrar el turno con "+money(+raw)+" contados en el cajón?"))return;
@@ -483,7 +496,7 @@ function impHTML(){
  const m=S.imp;
  let h='<h2>Importar desde Excel o CSV</h2><div class="card"><input type="file" id="xf" accept=".xlsx,.xls,.csv"><p class="note">Sirve para pasar tus productos y stock desde otra app. La primera fila debe tener los nombres de las columnas.</p>';
  if(m){
-  const F=[["nombre","Nombre del producto"],["codigo","Código de barras"],["precio","Precio de venta"],["costo","Costo"],["stock","Stock"],["venc","Vencimiento"]];
+  const F=[["nombre","Nombre del producto"],["codigo","Código de barras"],["precio","Precio de venta"],["costo","Costo"],["stock","Stock"],["venc","Vencimiento"],["cat","Categoría"],["prov","Proveedor"]];
   h+=F.map(f=>`<label class="note">${f[1]}<select data-imap="${f[0]}"><option value="-1">(no importar)</option>${m.hdr.map((x,i)=>`<option value="${i}"${m.map[f[0]]==i?" selected":""}>${esc(x||"Columna "+(i+1))}</option>`).join("")}</select></label>`).join("");
   h+=`<p class="note">${m.rows.length} filas. Ejemplo: ${esc(m.rows.slice(0,2).map(r=>m.map.nombre>=0?r[m.map.nombre]:"").join(" · "))}</p><button class="btn" data-impgo="1">Importar ${m.rows.length} filas</button>`;
  }
@@ -506,7 +519,7 @@ async function leerExcel(f){
    precio:find(/precio|venta|pvp/,/costo|compra/),
    costo:find(/costo|compra/),
    stock:find(/stock|cantidad|existencia|saldo/),
-   venc:find(/venc|caduc/)}};
+   venc:find(/venc|caduc/),cat:find(/categoria|rubro|familia/),prov:find(/proveedor/)}};
   render();
  }catch(e){toast("No pude leer ese archivo. Probá guardarlo como .xlsx o .csv")}
 }
@@ -529,10 +542,17 @@ async function importarExcel(){
  m.rows.forEach(r=>{
   const nombre=String(get(r,"nombre")).trim();if(!nombre)return;
   const cod=String(get(r,"codigo")==null?"":get(r,"codigo")).trim().replace(/\.0+$/,"")||null;
-  filas.push({nombre,cod,precio:num(get(r,"precio")),costo:num(get(r,"costo")),stock:num(get(r,"stock")),venc:fechaX(get(r,"venc"))});
+  filas.push({nombre,cod,precio:num(get(r,"precio")),costo:num(get(r,"costo")),stock:num(get(r,"stock")),venc:fechaX(get(r,"venc")),cat:String(get(r,"cat")==null?"":get(r,"cat")).trim(),prov:String(get(r,"prov")==null?"":get(r,"prov")).trim()});
  });
  if(!filas.length)return toast("No hay filas con nombre para importar");
  toast("Revisando los productos que ya tenés…");
+ const catId={};S.cats.forEach(c=>catId[c.nombre.toLowerCase()]=c.id);
+ const nuevasC=[...new Set(filas.map(f=>f.cat).filter(x=>x&&!catId[x.toLowerCase()]))];
+ if(nuevasC.length){
+  const {data:cn,error:ec}=await sb.from("categorias").insert(nuevasC.map(nombre=>({nombre}))).select("id,nombre");
+  if(ec)return toast("Error al crear categorías: "+ec.message);
+  cn.forEach(c=>catId[c.nombre.toLowerCase()]=c.id);
+ }
  const ya=await traerTodo("productos","id,nombre,codigo_barras");
  const byCod={},byName={};
  ya.forEach(p=>{if(p.codigo_barras)byCod[p.codigo_barras]=p.id;byName[p.nombre.toLowerCase()]=p.id});
@@ -543,7 +563,7 @@ async function importarExcel(){
   const ex=f.cod?byCod[f.cod]:byName[f.nombre.toLowerCase()];
   if(ex){keys.set(k,ex);existentes++;return}
   keys.set(k,null);
-  nuevos.push({k,row:{nombre:f.nombre,codigo_barras:f.cod,precio_venta:Number.isFinite(f.precio)&&f.precio>=0?f.precio:0,costo:Number.isFinite(f.costo)&&f.costo>=0?f.costo:null}});
+  nuevos.push({k,row:{nombre:f.nombre,codigo_barras:f.cod,categoria_id:f.cat?(catId[f.cat.toLowerCase()]||null):null,proveedor:f.prov||null,precio_venta:Number.isFinite(f.precio)&&f.precio>=0?f.precio:0,costo:Number.isFinite(f.costo)&&f.costo>=0?f.costo:null}});
  });
  for(let i=0;i<nuevos.length;i+=200){
   const ch=nuevos.slice(i,i+200);
@@ -645,7 +665,7 @@ async function guardarPrecio(id){
  const q=a=>document.querySelector("["+a+'="'+id+'"]');
  const mg=mgDe(q("data-pm").value,q("data-pmo").value),costo=q("data-pc").value===""?null:+q("data-pc").value,precio=+q("data-pp").value;
  if(!(precio>=0))return toast("Poné un precio válido");
- const {error}=await sb.from("productos").update({costo,precio_venta:precio,margen:mg,...(q("data-piv")?{alicuota_iva:+q("data-piv").value}:{})}).eq("id",id);
+ const {error}=await sb.from("productos").update({costo,precio_venta:precio,margen:mg,categoria_id:q("data-pcat").value||null,proveedor:q("data-pprov").value.trim()||null,...(q("data-piv")?{alicuota_iva:+q("data-piv").value}:{})}).eq("id",id);
  if(error)return toast(error.message);
  await loadData();toast("Precio guardado");render();
 }
@@ -662,7 +682,7 @@ function preciosHTML(d){
  const c=S.negocio||{},q=(S.pq||"").toLowerCase();
  const lista=S.prods.filter(p=>!q||p.nombre.toLowerCase().includes(q)).slice(0,25).map(p=>{
   const md=p.margen==null?"man":[30,40,50].includes(+p.margen)?String(+p.margen):"otro";
-  return `<div class="card"><b>${esc(p.nombre)}</b><div class="tr"><label>Costo<input data-pc="${p.id}" type="number" min="0" step="any" value="${p.costo==null?"":p.costo}"></label><label>Precio<input data-pp="${p.id}" type="number" min="0" step="any" value="${p.precio_venta}"></label></div><select data-pm="${p.id}">${mgOpts(md)}</select><input data-pmo="${p.id}" type="number" step="any" placeholder="Porcentaje de ganancia" value="${md=="otro"?p.margen:""}" style="${md=="otro"?"":"display:none"}">${esRI()?`<select data-piv="${p.id}">${ivaOpts(p.alicuota_iva==null?21:+p.alicuota_iva)}</select>`:""}<button class="btn" data-psave="${p.id}">Guardar precio</button></div>`;
+  return `<div class="card"><b>${esc(p.nombre)}</b><div class="tr"><label>Costo<input data-pc="${p.id}" type="number" min="0" step="any" value="${p.costo==null?"":p.costo}"></label><label>Precio<input data-pp="${p.id}" type="number" min="0" step="any" value="${p.precio_venta}"></label></div><select data-pm="${p.id}">${mgOpts(md)}</select><input data-pmo="${p.id}" type="number" step="any" placeholder="Porcentaje de ganancia" value="${md=="otro"?p.margen:""}" style="${md=="otro"?"":"display:none"}"><select data-pcat="${p.id}"><option value="">Sin categoría</option>${S.cats.map(c=>`<option value="${c.id}"${p.categoria_id==c.id?" selected":""}>${esc(c.nombre)}</option>`).join("")}</select><input data-pprov="${p.id}" placeholder="Proveedor" value="${esc(p.proveedor||"")}">${esRI()?`<select data-piv="${p.id}">${ivaOpts(p.alicuota_iva==null?21:+p.alicuota_iva)}</select>`:""}<button class="btn" data-psave="${p.id}">Guardar precio</button></div>`;
  }).join("");
  return `<h2>Precios y ganancia</h2><div class="card"><label>Ganancia por defecto (%)<input id="gmd" type="number" min="1" max="99" step="any" value="${c.margen_defecto==null?30:c.margen_defecto}"></label><label>Redondear precios a<select id="gre">${[1,10,50,100].map(n=>`<option value="${n}"${Number(c.redondeo||1)==n?" selected":""}>$${n}</option>`).join("")}</select></label><button class="btn" data-psetsave="1">Guardar</button><p class="note">Precio = costo ÷ (1 − ganancia). Con 30% es costo ÷ 0,7. El porcentaje es sobre el precio de venta. Si un producto tiene ganancia elegida y cambia su costo, el precio se actualiza solo.</p></div><div class="card"><input id="psq" placeholder="Buscar producto para editar su precio" value="${esc(S.pq||"")}"></div>${lista}`;
 }
@@ -789,10 +809,143 @@ function waBtn(c){
  const txt="Hola "+c.nombre+", te paso el resumen de tu cuenta en "+((S.negocio&&S.negocio.nombre)||"el negocio")+" al día de hoy: "+money(c.saldo)+". ¡Gracias!";
  return `<a href="https://wa.me/${n}?text=${encodeURIComponent(txt)}" target="_blank" rel="noopener" class="btn" style="display:block;text-align:center;text-decoration:none;background:var(--okbg);color:var(--ok)">Recordar por WhatsApp</a>`;
 }
+function masivoFiltro(){
+ const cat=$("mf_cat").value,prov=$("mf_prov").value,txt=$("mf_txt").value.trim().toLowerCase();
+ return S.prods.filter(p=>(!cat||p.categoria_id==cat)&&(!prov||p.proveedor==prov)&&(!txt||p.nombre.toLowerCase().includes(txt)));
+}
+function masivoNuevo(p,pct){
+ const f=1+pct/100;
+ if(p.margen!=null&&p.costo>0){
+  const c=Math.round(p.costo*f*10000)/10000,pr=precioDe(c,+p.margen);
+  return Number.isFinite(pr)?pr:p.precio_venta;
+ }
+ const r=redondeoN();
+ return Math.round(Math.round(p.precio_venta*f/r)*r*100)/100;
+}
+function masivoCalc(){
+ const L=masivoFiltro(),pct=+$("mf_pct").value,el=$("mpv");
+ if(!el)return;
+ if(!L.length){el.textContent="Ningún producto coincide con el filtro.";return}
+ if(!pct){el.textContent=L.length+" productos coinciden. Escribí el porcentaje.";return}
+ const e=L[0];
+ el.textContent=L.length+" productos. Ejemplo: "+e.nombre+" pasa de "+money(e.precio_venta)+" a "+money(masivoNuevo(e,pct))+".";
+}
+async function aplicarAumento(){
+ const L=masivoFiltro(),pct=+$("mf_pct").value;
+ if(!L.length)return toast("Ningún producto coincide con el filtro");
+ if(!pct||pct<=-90||pct>500)return toast("Poné un porcentaje válido (por ejemplo 8)");
+ if(!confirm("¿"+(pct>0?"Aumentar":"Bajar")+" "+Math.abs(pct)+"% el precio de "+L.length+" productos?"))return;
+ toast("Actualizando precios…");
+ let n=0;
+ for(let i=0;i<L.length;i+=300){
+  const {data,error}=await sb.rpc("aumentar_precios",{p_pct:pct,p_ids:L.slice(i,i+300).map(p=>p.id)});
+  if(error)return toast("Se actualizaron "+n+" y falló: "+error.message);
+  n+=data||0;
+ }
+ await loadData();toast("Precios actualizados: "+n+" productos");render();
+}
+async function nuevaCategoria(){
+ const n=$("catn").value.trim();
+ if(!n)return toast("Escribí el nombre de la categoría");
+ const {error}=await sb.from("categorias").insert({nombre:n});
+ if(error)return toast(error.message);
+ await loadData();toast("Categoría creada");render();
+}
+function masivoHTML(d){
+ if(d)return "";
+ const provs=[...new Set(S.prods.map(p=>p.proveedor).filter(Boolean))].sort();
+ return `<h2>Aumento masivo de precios</h2><div class="card"><select id="mf_cat"><option value="">Todas las categorías</option>${S.cats.map(c=>`<option value="${c.id}">${esc(c.nombre)}</option>`).join("")}</select><select id="mf_prov"><option value="">Todos los proveedores</option>${provs.map(x=>`<option value="${esc(x)}">${esc(x)}</option>`).join("")}</select><input id="mf_txt" placeholder="Que el nombre contenga… (opcional)"><input id="mf_pct" type="number" step="any" inputmode="decimal" placeholder="Porcentaje (ej: 8, o -5 para bajar)"><p id="mpv" class="note">Elegí un filtro y el porcentaje.</p><button class="btn" data-mapply="1">Aplicar a los productos filtrados</button><p class="note">Si el producto tiene ganancia elegida, sube su costo y el precio se recalcula. Si no, sube el precio directo.</p></div><div class="card"><input id="catn" placeholder="Nueva categoría"><button class="btn" data-catnew="1">Crear categoría</button></div>`;
+}
+const esRed=e=>!!e&&/fetch|network|Failed|Load failed/i.test(String(e.message||e));
+const idb=()=>new Promise((res,rej)=>{const r=indexedDB.open("almacen",1);r.onupgradeneeded=()=>{const d=r.result;d.createObjectStore("kv");d.createObjectStore("cola",{keyPath:"local_id"})};r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)});
+const idbTx=async(store,mode,fn)=>{const d=await idb();return new Promise((res,rej)=>{const t=d.transaction(store,mode),rq=fn(t.objectStore(store));t.oncomplete=()=>res(rq&&rq.result);t.onerror=()=>rej(t.error)})};
+const kvSet=(k,v)=>idbTx("kv","readwrite",st=>st.put(v,k)).catch(()=>{});
+const kvGet=k=>idbTx("kv","readonly",st=>st.get(k)).catch(()=>null);
+const colaAgregar=v=>idbTx("cola","readwrite",st=>st.put(v));
+const colaLeer=()=>idbTx("cola","readonly",st=>st.getAll()).then(a=>(a||[]).sort((x,y)=>x.creada_en>y.creada_en?1:-1)).catch(()=>[]);
+const colaBorrar=id=>idbTx("cola","readwrite",st=>st.delete(id));
+async function actualizarCola(){S.cola=(await colaLeer()).length}
+function snapGuardar(){
+ if(!S.user||!S.perfil)return;
+ kvSet("snap",{user:{id:S.user.id,email:S.user.email},perfil:S.perfil,negocio:S.negocio,locs:S.locs,loc:S.loc,prods:S.prods,stock:S.stock,cli:S.cli,cats:S.cats,cfg:S.cfg,caja:S.caja,na:S.na});
+}
+async function usarSnapshot(){
+ const sn=await kvGet("snap");
+ if(!sn||!sn.user||!sn.perfil)return false;
+ Object.assign(S,{user:sn.user,perfil:sn.perfil,negocio:sn.negocio,locs:sn.locs,loc:sn.loc,prods:sn.prods,stock:sn.stock,cli:sn.cli,cats:sn.cats,cfg:sn.cfg,caja:sn.caja,na:sn.na,offline:true});
+ S.rol=S.perfil.rol=="vendedor"?"cajero":S.perfil.rol=="encargado"?"admin":S.perfil.rol;
+ S.tab=S.rol=="repositor"?"i":"v";
+ await actualizarCola();render();
+ return true;
+}
+function estadoRedHTML(){
+ const off=S.offline||!navigator.onLine;
+ return (off?'<small style="color:var(--warn);font-weight:600">Sin conexión</small>':"")+(S.cola?`<small style="color:var(--bad);font-weight:600">${S.cola} por enviar</small>`:"");
+}
+function descontarLocal(v){
+ v.items.forEach(it=>{const r=S.stock.find(x=>x.lote_id==it.lote_id);if(r)r.cantidad=Math.round((r.cantidad-it.cantidad)*1000)/1000});
+ S.stock=S.stock.filter(x=>x.cantidad>0);
+ if(v.cliente_id){const c=S.cli.find(x=>x.cliente_id==v.cliente_id);if(c)c.saldo=Number(c.saldo)+v.total}
+ snapGuardar();
+}
+async function enviarVenta(v){
+ if(navigator.onLine){
+  const {data,error}=await sb.rpc("registrar_venta",{p:v});
+  if(!error)return {ok:true,id:data};
+  if(!esRed(error))return {ok:false,msg:error.message};
+ }
+ await colaAgregar(v);
+ descontarLocal(v);
+ return {ok:true,pendiente:true};
+}
+async function sincronizar(manual){
+ if(S.sync)return;
+ if(!navigator.onLine){if(manual)toast("Todavía no hay conexión");return}
+ const cola=await colaLeer();
+ if(!cola.length){await actualizarCola();return}
+ S.sync=true;
+ const ok=[];let fallo=0;
+ for(const v of cola){
+  if(v.error&&!manual)continue;
+  const {data,error}=await sb.rpc("registrar_venta",{p:v});
+  if(!error){await colaBorrar(v.local_id);ok.push(data);continue}
+  if(esRed(error))break;
+  v.error=error.message;await colaAgregar(v);fallo++;
+ }
+ S.sync=false;
+ await actualizarCola();
+ if(ok.length){
+  await loadData();
+  toast(ok.length+(ok.length>1?" ventas enviadas":" venta enviada")+(fallo?" · "+fallo+" con problemas":""));
+  render();
+  if(S.negocio&&S.negocio.facturacion_activa&&S.negocio.facturar_auto){
+   const errs=[];
+   for(const id of ok){const r=await facturarVenta(id);if(!r.ok)errs.push(r.msg)}
+   if(errs.length)alert("Algunas ventas se enviaron pero no se pudieron facturar: "+errs[0]+"\nPodés facturarlas desde la pestaña Ventas.");
+  }
+ }else if(fallo&&manual)toast("Hay ventas que no se pueden enviar. Mirá el motivo en la pestaña Ventas.");
+ else render();
+}
+async function descartarVenta(id){
+ if(!confirm("¿Descartar esta venta? No se va a registrar."))return;
+ await colaBorrar(id);await actualizarCola();
+ if(navigator.onLine)await loadData();
+ render();
+}
+async function pendientesHTML(){
+ const cola=await colaLeer();S.cola=cola.length;
+ if(!cola.length)return "";
+ return `<h2>Ventas por enviar (${cola.length})</h2>`+cola.map(v=>`<div class="card"><div class="top"><span>${new Date(v.creada_en).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})}</span><span>${money(v.total)}</span></div>${v.error?`<small class="note" style="color:var(--bad)">${esc(v.error)}</small><br>`:'<small class="note">Esperando conexión</small><br>'}<button style="color:var(--pri);font-weight:600;padding:6px" data-sync="1">Reintentar</button> <button style="color:var(--bad);font-weight:600;padding:6px" data-descartar="${v.local_id}">Descartar</button></div>`).join("");
+}
+async function reconectar(){
+ S.offline=false;
+ await sincronizar();
+ if(S.user&&(await loadData())!==false)render();
+}
 async function newProd(){
  const g=id=>$(id).value.trim();
  if(!g("np")||!(+g("npr")>=0)||g("npr")==="")return toast("Falta el nombre o el precio");
- const {data:np,error}=await sb.from("productos").insert({nombre:g("np"),codigo_barras:g("nb")||null,precio_venta:+g("npr"),unidad:$("nu").value,alicuota_iva:$("niv")?+$("niv").value:21,margen:mgDe($("nm").value,$("nmo").value),costo:g("nco")===""?null:+g("nco")}).select("id").single();
+ const {data:np,error}=await sb.from("productos").insert({nombre:g("np"),codigo_barras:g("nb")||null,precio_venta:+g("npr"),unidad:$("nu").value,categoria_id:$("ncat").value||null,proveedor:g("nprov")||null,alicuota_iva:$("niv")?+$("niv").value:21,margen:mgDe($("nm").value,$("nmo").value),costo:g("nco")===""?null:+g("nco")}).select("id").single();
  if(error)return toast(error.message);
  const q0=+$("nsi").value||0;
  if(q0>0){
@@ -831,6 +984,10 @@ document.addEventListener("click",async e=>{
  if(d.fcan){const f=$("fm");if(f)f.remove();return}
  if(d.fcred)return guardarCredenciales();
  if(d.fsave)return guardarOpcionesFact();
+ if(d.sync)return sincronizar(true);
+ if(d.descartar)return descartarVenta(d.descartar);
+ if(d.mapply)return aplicarAumento();
+ if(d.catnew)return nuevaCategoria();
  if(d.movcaja)return registrarMov();
  if(d.psave)return guardarPrecio(d.psave);
  if(d.psetsave)return guardarPreciosCfg();
@@ -848,9 +1005,10 @@ document.addEventListener("click",async e=>{
  if(d.imp)return importar();
  if(d.close){const {data,error}=await sb.rpc("cerrar_dia",{p_ubicacion:S.loc});return error?toast(error.message):toast("Día cerrado. Vendido "+money(data.vendido)+" · Invertido "+money(data.invertido)+" · Ganancia "+money(data.ganancia))}
  if(d.save){const {error}=await sb.from("configuracion_alertas").update({stock_minimo_general:+$("gm").value||0,dias_alerta_vencimiento:+$("gd").value||0}).eq("negocio_id",S.perfil.negocio_id);if(error)return toast(error.message);await loadData();return toast("Límites guardados")}
- if(d.out){await sb.auth.signOut();S.cart={};return renderLogin()}
+ if(d.out){const pend=await colaLeer();if(pend.length)return toast("Hay "+pend.length+" ventas sin enviar. Esperá a que se envíen antes de salir.");await kvSet("snap",null);await sb.auth.signOut();S.cart={};return renderLogin()}
 });
 document.addEventListener("change",async e=>{
+ if(e.target.id=="mf_cat"||e.target.id=="mf_prov"){masivoCalc();return}
  if(e.target.id=="ip"){prefillIngreso();return}
  if(e.target.id=="im"){$("imo").style.display=e.target.value=="otro"?"block":"none";calcIngreso();return}
  if(e.target.id=="nm"){$("nmo").style.display=e.target.value=="otro"?"block":"none";calcNuevo();return}
@@ -868,6 +1026,7 @@ document.addEventListener("change",async e=>{
 });
 document.addEventListener("input",e=>{
  if(e.target.id=="q"){S.q=e.target.value;$("vl").innerHTML=listHTML();return}
+ if(e.target.id=="mf_txt"||e.target.id=="mf_pct"){masivoCalc();return}
  if(e.target.id=="ic"||e.target.id=="imo"){calcIngreso();return}
  if(e.target.id=="ipr"){$("im").value="man";$("imo").style.display="none";return}
  if(e.target.id=="nco"||e.target.id=="nmo"){calcNuevo();return}
@@ -897,7 +1056,11 @@ document.addEventListener("keydown",e=>{
  if(e.key=="Enter"){if(buf.length>3){e.preventDefault();scan(buf)}buf="";return}
  if(e.key.length==1){buf+=e.key;clearTimeout(scan.t);scan.t=setTimeout(()=>buf="",150)}
 });
-boot();
+if("serviceWorker" in navigator)navigator.serviceWorker.register("sw.js").catch(()=>{});
+window.addEventListener("online",()=>{reconectar()});
+window.addEventListener("offline",()=>{S.offline=true;if(S.user)render()});
+setInterval(()=>{if(S.user&&navigator.onLine)sincronizar()},30000);
+boot().then(()=>{actualizarCola();sincronizar()});
 </script>
 </body>
 </html>
