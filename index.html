@@ -124,13 +124,17 @@ function listHTML(){
 function viewV(){return `${S.caja?"":'<div class="card alert"><b>La caja está cerrada</b><br><small class="note">Abrila en la pestaña Ventas para poder cobrar.</small></div>'}<button class="btn" data-cam="v" style="margin:0 0 8px">Escanear con la cámara</button><input id="q" type="search" placeholder="Escanear con lápiz o buscar producto" value="${esc(S.q)}" autocomplete="off"><div id="vl">${listHTML()}</div><p class="note">Lápiz óptico: conectalo por USB o Bluetooth y escaneá. Cada venta descuenta primero el lote que vence antes.</p>`}
 
 async function viewS(){
+ const adm=S.rol=="admin";
  const {data}=S.caja?await sb.from("ventas").select("id,total,costo_total,creada_en").eq("caja_id",S.caja.id).order("creada_en",{ascending:false}):{data:[]};
  const m=data||[],cmp=await comprobantesDe(m.map(s=>s.id)),v=m.reduce((a,s)=>a+Number(s.total),0),i=m.reduce((a,s)=>a+Number(s.costo_total),0);
- return resHTML()+`<h2>Ventas de la caja actual</h2><div class="card"><div class="fld"><span>Vendido</span><b>${money(v)}</b></div><div class="fld"><span>Invertido (costo de lo vendido)</span><b>${money(i)}</b></div><div class="fld"><span>Ganancia</span><b class="gan">${money(v-i)}</b></div><p class="note">${m.length} ventas. Ganancia = vendido − invertido.</p></div>`+
-  cajaHTML()+"<h2>Ventas de esta caja</h2>"+
-  (m.map(s=>`<div class="card"><div class="top"><span>${new Date(s.creada_en).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})}</span><span>${money(s.total)}</span></div><small class="note">Ganancia ${money(s.total-s.costo_total)}</small>${comprobanteHTML(s.id,cmp)}</div>`).join("")||'<p class="card">Todavía no hay ventas en esta caja.</p>')+(S.rol=="admin"?mesHTML(await fetchMes(false)):"");
+ let h=resHTML();
+ if(adm)h+=`<h2>Ventas de la caja actual</h2><div class="card"><div class="fld"><span>Vendido</span><b>${money(v)}</b></div><div class="fld"><span>Invertido (costo de lo vendido)</span><b>${money(i)}</b></div><div class="fld"><span>Ganancia</span><b class="gan">${money(v-i)}</b></div><p class="note">${m.length} ventas. Ganancia = vendido − invertido.</p></div>`;
+ h+=cajaHTML();
+ if(S.caja)h+=await gastosHTML();
+ h+="<h2>Ventas de esta caja</h2>"+(m.map(s=>`<div class="card"><div class="top"><span>${new Date(s.creada_en).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})}</span><span>${money(s.total)}</span></div>${adm?`<small class="note">Ganancia ${money(s.total-s.costo_total)}</small>`:""}${comprobanteHTML(s.id,cmp)}</div>`).join("")||'<p class="card">Todavía no hay ventas en esta caja.</p>');
+ if(adm)h+=await cierresHTML()+mesHTML(await fetchMes(false));
+ return h;
 }
-
 async function viewI(){
  const opts=S.prods.map(p=>`<option value="${p.id}">${esc(p.nombre)}</option>`).join("");
  return `<h2>Ingresar mercadería</h2><div class="card"><button class="btn" data-cam="i" style="margin:0 0 8px">Escanear producto con la cámara</button><select id="ip">${opts}</select><input id="iq" type="number" min="0" step="any" inputmode="decimal" placeholder="Cantidad (en kilos si es por peso)"><input id="ic" type="number" min="0" step="any" placeholder="Costo por unidad (por kilo si es por peso)"><select id="im">${mgOpts(defModo())}</select><input id="imo" type="number" step="any" placeholder="Porcentaje de ganancia" style="display:none"><input id="ipr" type="number" min="0" step="any" inputmode="decimal" placeholder="Precio de venta (se calcula solo)"><input id="ie" type="date" aria-label="Vencimiento"><input id="il" placeholder="Código de lote (opcional)"><button class="btn" data-ing="1">Cargar al stock</button><p class="note">Se carga en la ubicación elegida arriba. El vencimiento se deja vacío si el producto no vence.</p></div>`+
@@ -286,12 +290,12 @@ function onCode(code,mode){
 }
 function cajaHTML(){
  if(!S.caja)return '<h2>Caja</h2><div class="card"><b>Caja cerrada</b><input id="cini" type="number" min="0" placeholder="Efectivo inicial en caja" style="margin-top:8px"><button class="btn" data-open="1">Abrir caja</button></div>';
- return `<h2>Caja</h2><div class="card"><b>Caja abierta</b><br><small class="note">Desde ${new Date(S.caja.abierta_en).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})} · inicial ${money(S.caja.monto_inicial)}</small><input id="ccont" type="number" min="0" placeholder="Efectivo contado al cerrar" style="margin-top:8px"><button class="btn" data-closecaja="1">Cerrar caja</button></div>`;
+ return `<h2>Caja</h2><div class="card"><b>Caja abierta</b><br><small class="note">Desde ${new Date(S.caja.abierta_en).toLocaleTimeString("es-AR",{hour:"2-digit",minute:"2-digit"})} · inicial ${money(S.caja.monto_inicial)}</small><input id="ccont" type="number" min="0" placeholder="Efectivo que contaste en el cajón" step="any" style="margin-top:8px"><p class="note">Contá el efectivo del cajón y anotalo. El sistema no te muestra cuánto debería haber.</p><button class="btn" data-closecaja="1">Cerrar turno</button></div>`;
 }
 function resHTML(){
  const r=S.res;if(!r)return "";
- const d=Number(r.diferencia);
- return `<h2>Caja cerrada</h2><div class="card"><div class="fld"><span>Vendido</span><b>${money(r.vendido)}</b></div><div class="fld"><span>Invertido</span><b>${money(r.invertido)}</b></div><div class="fld"><span>Ganancia</span><b class="gan">${money(r.vendido-r.invertido)}</b></div><div class="fld"><span>Efectivo esperado</span><b>${money(r.efectivo_esperado)}</b></div><div class="fld"><span>Efectivo contado</span><b>${money(r.monto_contado)}</b></div><div class="fld"><span>Diferencia</span><b class="${d==0?"gan":""}">${d>0?"+":""}${money(d)}</b></div><button class="btn" data-okres="1">Entendido</button></div>`;
+ const d=Number(r.diferencia),f=x=>money(x||0),col=d==0?"var(--ok)":d<0?"var(--bad)":"var(--warn)";
+ return `<h2>Turno cerrado</h2><div class="card"><div class="fld"><span>Vendido</span><b>${f(r.vendido)}</b></div><div class="fld"><span>Ganancia</span><b class="gan">${f(r.vendido-r.invertido)}</b></div><h2 style="margin:12px 0 4px">Efectivo</h2><div class="fld"><span>Esperado en el cajón</span><b>${f(r.efectivo_esperado)}</b></div><div class="fld"><span>Contado</span><b>${f(r.monto_contado)}</b></div><div class="fld"><span>${d>0?"Sobró":d<0?"Faltó":"Diferencia"}</span><b style="color:${col}">${f(Math.abs(d))}</b></div><h2 style="margin:12px 0 4px">Otros medios</h2><div class="fld"><span>Transferencias</span><b>${f(r.total_transferencia)}</b></div><div class="fld"><span>Tarjeta</span><b>${f(r.total_tarjeta)}</b></div><div class="fld"><span>Fiado</span><b>${f(r.total_fiado)}</b></div><div class="fld"><span>Gastos de caja</span><b>${f(r.total_gastos)}</b></div><div class="fld"><span>Retiros</span><b>${f(r.total_retiros)}</b></div><button class="btn" data-okres="1">Entendido</button></div>`;
 }
 async function abrirCaja(){
  const raw=$("cini").value;
@@ -303,10 +307,11 @@ async function abrirCaja(){
 async function cerrarCaja(){
  const raw=$("ccont").value;
  if(raw===""||!(+raw>=0))return toast("Poné el efectivo que contaste en la caja");
+ if(!confirm("¿Cerrar el turno con "+money(+raw)+" contados en el cajón?"))return;
  const {data,error}=await sb.rpc("cerrar_caja",{p_caja:S.caja.id,p_contado:+raw});
  if(error)return toast(error.message);
  await sb.rpc("cerrar_dia",{p_ubicacion:S.loc});
- S.res=data;await loadData();render();
+ if(data&&data.vendido!=null)S.res=data;else toast("Turno cerrado. ¡Gracias!");await loadData();render();
 }
 async function fetchMes(det){
  S.mes=S.mes||(()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")})();
@@ -437,7 +442,7 @@ function viewK(){
  const deuda=S.cli.reduce((a,c)=>a+Math.max(0,Number(c.saldo)),0);
  const lista=S.cli.map(c=>{
   const s=Number(c.saldo);
-  return `<div class="card"><div class="top"><span>${esc(c.nombre)}</span><span class="${s>0?"":"gan"}">${money(s)}</span></div>${c.telefono?`<small class="note">${esc(c.telefono)}</small><br>`:""}${s>0?`<div class="tr"><label>Pago<input id="pg${c.cliente_id}" type="number" min="0" step="any" inputmode="decimal" placeholder="Monto"></label><label>Medio<select id="pm${c.cliente_id}"><option value="efectivo">Efectivo</option><option value="transferencia">Transferencia</option><option value="tarjeta">Tarjeta</option></select></label></div><button class="btn" data-cpay="${c.cliente_id}">Registrar pago</button>`:'<small class="note">Sin deuda</small>'}</div>`;
+  return `<div class="card"><div class="top"><span>${esc(c.nombre)}</span><span class="${s>0?"":"gan"}">${money(s)}</span></div>${c.telefono?`<small class="note">${esc(c.telefono)}</small><br>`:""}${s>0?`<div class="tr"><label>Pago<input id="pg${c.cliente_id}" type="number" min="0" step="any" inputmode="decimal" placeholder="Monto"></label><label>Medio<select id="pm${c.cliente_id}"><option value="efectivo">Efectivo</option><option value="transferencia">Transferencia</option><option value="tarjeta">Tarjeta</option></select></label></div><button class="btn" data-cpay="${c.cliente_id}">Registrar pago</button>${waBtn(c)}`:'<small class="note">Sin deuda</small>'}</div>`;
  }).join("")||'<p class="note">Todavía no hay clientes.</p>';
  return `<h2>Fiado: total adeudado ${money(deuda)}</h2>${lista}<h2>Nuevo cliente</h2><div class="card"><input id="cn" placeholder="Nombre"><input id="ct" inputmode="tel" placeholder="Teléfono (opcional)"><input id="cl" type="number" min="0" step="any" placeholder="Límite de crédito (opcional)"><button class="btn" data-cnew="1">Guardar cliente</button></div>`;
 }
@@ -746,6 +751,44 @@ async function guardarOpcionesFact(){
 const IVA=[21,10.5,27,5,2.5,0];
 const ivaOpts=sel=>IVA.map(v=>`<option value="${v}"${Number(sel)==v?" selected":""}>${v==0?"Exento / 0%":"IVA "+v+"%"}</option>`).join("");
 const esRI=()=>!!(S.negocio&&S.negocio.condicion_iva=="responsable_inscripto");
+async function gastosHTML(){
+ const {data}=await sb.from("movimientos_caja").select("tipo,monto,motivo,creado_en").eq("caja_id",S.caja.id).order("creado_en",{ascending:false});
+ const T={gasto:"Gasto",retiro:"Retiro",ingreso:"Ingreso"};
+ return `<h2>Gastos y retiros de caja</h2><div class="card"><select id="mt"><option value="gasto">Gasto (ej: pago al sodero)</option><option value="retiro">Retiro del dueño</option><option value="ingreso">Ingreso de efectivo</option></select><input id="mm" type="number" min="0" step="any" inputmode="decimal" placeholder="Monto"><input id="mo" placeholder="Motivo"><button class="btn" data-movcaja="1">Anotar</button></div>`+(data||[]).map(x=>`<div class="card fld"><span>${T[x.tipo]||x.tipo}: ${esc(x.motivo||"")}</span><b>${money(x.monto)}</b></div>`).join("");
+}
+async function registrarMov(){
+ const monto=Math.round((+$("mm").value||0)*100)/100,motivo=$("mo").value.trim(),tipo=$("mt").value;
+ if(!(monto>0))return toast("Poné el monto");
+ if(tipo!="retiro"&&!motivo)return toast("Escribí el motivo");
+ const {error}=await sb.from("movimientos_caja").insert({caja_id:S.caja.id,tipo,monto,motivo:motivo||null,usuario_id:S.user.id});
+ if(error)return toast(error.message);
+ toast("Anotado");render();
+}
+async function cierresHTML(){
+ const cols="cerrada_en,monto_contado,efectivo_esperado,diferencia,total_transferencia,total_tarjeta,total_fiado,total_gastos,total_retiros";
+ const base=()=>sb.from("cajas");
+ let {data,error}=await base().select(cols+",cierra:perfiles!cajas_cerrada_por_fkey(nombre)").eq("estado","cerrada").eq("ubicacion_id",S.loc).order("cerrada_en",{ascending:false}).limit(15);
+ if(error)({data}=await base().select(cols).eq("estado","cerrada").eq("ubicacion_id",S.loc).order("cerrada_en",{ascending:false}).limit(15));
+ if(!data||!data.length)return "";
+ const f=x=>money(x||0);
+ return "<h2>Últimos turnos cerrados</h2>"+data.map(c=>{
+  const d=Number(c.diferencia||0),col=d==0?"var(--ok)":d<0?"var(--bad)":"var(--warn)";
+  return `<div class="card"><div class="top"><span>${new Date(c.cerrada_en).toLocaleString("es-AR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}${c.cierra?" · "+esc(c.cierra.nombre):""}</span><span style="color:${col}">${d==0?"Justo":(d>0?"Sobró ":"Faltó ")+f(Math.abs(d))}</span></div><small class="note">Esperado ${f(c.efectivo_esperado)} · Contado ${f(c.monto_contado)}<br>Transf. ${f(c.total_transferencia)} · Tarjeta ${f(c.total_tarjeta)} · Fiado ${f(c.total_fiado)}<br>Gastos ${f(c.total_gastos)} · Retiros ${f(c.total_retiros)}</small></div>`;
+ }).join("");
+}
+function waNum(t){
+ let d=String(t||"").replace(/\D/g,"").replace(/^0+/,"");
+ if(!d)return "";
+ if(d.startsWith("54"))return d.startsWith("549")?d:"549"+d.slice(2);
+ if(d.length==12)for(const k of [2,3,4])if(d.slice(k,k+2)=="15"){d=d.slice(0,k)+d.slice(k+2);break}
+ return "549"+d;
+}
+function waBtn(c){
+ const n=waNum(c.telefono);
+ if(!n)return '<small class="note">Cargá el teléfono del cliente para recordarle por WhatsApp.</small>';
+ const txt="Hola "+c.nombre+", te paso el resumen de tu cuenta en "+((S.negocio&&S.negocio.nombre)||"el negocio")+" al día de hoy: "+money(c.saldo)+". ¡Gracias!";
+ return `<a href="https://wa.me/${n}?text=${encodeURIComponent(txt)}" target="_blank" rel="noopener" class="btn" style="display:block;text-align:center;text-decoration:none;background:var(--okbg);color:var(--ok)">Recordar por WhatsApp</a>`;
+}
 async function newProd(){
  const g=id=>$(id).value.trim();
  if(!g("np")||!(+g("npr")>=0)||g("npr")==="")return toast("Falta el nombre o el precio");
@@ -788,6 +831,7 @@ document.addEventListener("click",async e=>{
  if(d.fcan){const f=$("fm");if(f)f.remove();return}
  if(d.fcred)return guardarCredenciales();
  if(d.fsave)return guardarOpcionesFact();
+ if(d.movcaja)return registrarMov();
  if(d.psave)return guardarPrecio(d.psave);
  if(d.psetsave)return guardarPreciosCfg();
  if(d.balsave)return guardarBalanza();
